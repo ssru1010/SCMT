@@ -155,11 +155,6 @@ Schema  5: " (0.352) |  says (0.299) |  smiled (0.267) | ! (0.261) | . (0.252) |
 Schema  6: " (0.532) |  from (0.325) |  replied (0.321) |  again (0.321) | ! (0.312) | M (0.297) |  water (0.296) |  happened (0.293)
 ```
 
-### **Generative Behavior**
-
-* **Chemistry task:** generates syntactically valid SMILES-like sequences with plausible structural recurrence.
-* **Language task:** produces rhythmic but semantically inconsistent text; indicative of partial coherence and under-trained schema adaptation.
-
 ### **Compute and Domain Decision**
 
 > Due to limited computational resources, large-scale NLP evaluation was not feasible.
