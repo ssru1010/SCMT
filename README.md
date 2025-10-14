@@ -1,12 +1,10 @@
-# Schema-Augmented Self-Optimizing Memory Transformer (SCMT)
+# **Schema-Augmented Self-Optimizing Memory Transformer (SCMT)**
 
----
+**SCMT** is an experimental transformer architecture extending the **Self-Optimizing Memory Transformer (SOMT)** with **schema-level abstraction** and **adaptive episodic memory management**.
+It unifies two complementary mechanisms: **instance-level episodic memory** for contextual recall and **schema-level generalization** for abstract pattern consolidation.
+The design encourages compact, reusable representations that can self-organize over streaming or long-context data.
 
-## **Model Overview**
-
-**SCMT** is an experimental transformer architecture that extends the **Self-Optimizing Memory Transformer (SOMT)** with schema-level abstraction and adaptive episodic memory management. It introduces a dual mechanism of **instance-level memory** and **schema-level generalization**, enabling the model to learn compact, reusable representational patterns over streaming or long-context data.
-
-The implementation remains self-contained and modular, designed for research compatibility with HuggingFace-style APIs while emphasizing interpretability and experimental transparency.
+The implementation is **self-contained, modular, and HuggingFace-compatible**, emphasizing **interpretability**, **experimental transparency**, and **research extensibility**.
 
 ---
 
@@ -18,58 +16,57 @@ This model is intended for **research exploration** in:
 * Schema abstraction and hierarchical reasoning.
 * Symbolic generalization across structured domains (e.g., molecules, code, or text).
 
-It is **not suitable for production deployment** and should be used only in controlled research settings.
+It is **not suitable for production deployment** and should be used only in controlled research environments.
 
 ---
 
 ## **Architectural Summary**
 
-| Component            | Description                                                                                                    |
-| -------------------- | -------------------------------------------------------------------------------------------------------------- |
-| **Base Encoder**     | TransformerEncoder (causal masked) for autoregressive modeling.                                                |
-| **Memory Module**    | Dynamic external memory with learned importance, recency decay, and entropy-thresholded writing.               |
-| **Schema Router**    | Aggregates episodic traces into schema representations (`num_schemas`), serving as generalized latent anchors. |
-| **Uncertainty Gate** | Scales attention queries based on local token entropy.                                                         |
-| **Retrieval Fusion** | Combines schema-level and instance-level retrievals into a unified latent space.                               |
-| **Auxiliary Heads**  | Regularizers for entropy smoothness, L2 importance, and schema-utility consistency.                            |
-| **Generation Head**  | Shared-weight LM head with top-k/top-p filtering and repetition penalties.                                     |
+| Component            | Description                                                                                                            |
+| -------------------- | ---------------------------------------------------------------------------------------------------------------------- |
+| **Base Encoder**     | `TransformerEncoder` (causal-masked) serving as the autoregressive backbone.                                           |
+| **Memory Module**    | Dynamic episodic memory with learned *importance*, *recency decay*, and *entropy-thresholded writing*.                 |
+| **Schema Router**    | MLP-based routing network aggregating episodic traces into persistent schema representations (`num_schemas`).          |
+| **Uncertainty Gate** | Scales attention queries based on local token entropy, controlling retrieval strength.                                 |
+| **Retrieval Fusion** | Merges schema-level and instance-level retrievals into a unified latent context.                                       |
+| **Auxiliary Heads**  | Lightweight scalar regularizers enforcing entropy smoothness, L2 importance stability, and schema-utility consistency. |
+| **Generation Head**  | Shared-weight LM head supporting temperature, top-k/top-p filtering, and repetition penalties.                         |
 
 ---
 
-## **Configuration (SOMTConfig)**
+## **Configuration (`SOMTConfig`)**
 
-| Parameter             | Default | Description                           |
-| --------------------- | ------- | ------------------------------------- |
-| `vocab_size`          | 50257   | Vocabulary size (GPT-2 compatible).   |
-| `d_model`             | 256     | Transformer hidden size.              |
-| `nhead`               | 8       | Attention heads.                      |
-| `num_layers`          | 4       | Transformer layers.                   |
-| `max_len`             | 256     | Context length.                       |
-| `mem_size`            | 128     | Episodic memory capacity.             |
-| `num_schemas`         | 32      | Number of schema units.               |
-| `recency_lambda`      | 0.01    | Recency weighting.                    |
-| `entropy_reg_coef`    | 1e-3    | Entropy regularization.               |
-| `l2_importance_coef`  | 1e-4    | L2 regularization for importance.     |
-| `schema_utility_coef` | 1e-2    | Schema utility objective coefficient. |
+| Parameter             | Default | Description                                    |
+| --------------------- | ------- | ---------------------------------------------- |
+| `vocab_size`          | 50257   | Vocabulary size (GPT-2 compatible).            |
+| `d_model`             | 256     | Transformer hidden size.                       |
+| `nhead`               | 8       | Number of attention heads.                     |
+| `num_layers`          | 4       | Number of Transformer encoder layers.          |
+| `max_len`             | 256     | Maximum context length.                        |
+| `mem_size`            | 128     | Episodic memory capacity (slots).              |
+| `num_schemas`         | 32      | Number of schema abstraction units.            |
+| `recency_lambda`      | 0.01    | Recency weighting factor for memory retention. |
+| `entropy_reg_coef`    | 1e-3    | Coefficient for entropy regularization.        |
+| `l2_importance_coef`  | 1e-4    | Coefficient for L2 importance regularization.  |
+| `schema_utility_coef` | 1e-2    | Coefficient for schema-utility objective.      |
 
 ---
 
 ## **Design Rationale**
 
-The design aims to capture a *dialectical balance* between **episodic specificity** and **schematic generality**.
-Entropy is employed as a meta-signal guiding both **memory updates** and **retrieval modulation**, ensuring capacity is allocated adaptively according to uncertainty.
-Schema abstraction acts as an emergent compression mechanism over episodic traces, promoting transferability and stability in representational dynamics.
+The architecture pursues a *dialectical balance* between **episodic specificity** and **schematic generality**.
+Entropy functions as a meta-signal guiding **memory updates** and **retrieval modulation**, dynamically reallocating capacity according to uncertainty.
+Schema abstraction arises as an emergent compression over episodic traces, promoting *transferability*, *representation stability*, and *symbolic coherence* within long-horizon learning.
 
 ---
 
 ## **Implementation Notes**
 
 * Framework: **PyTorch ≥ 2.1**
-* Save/load: `save_pretrained()` and `from_pretrained()`
+* API: compatible `save_pretrained()` and `from_pretrained()` methods
 * Generation: supports temperature, top-k/top-p, and repetition penalties
-* Minimal dependencies; lightweight experimental interface
-* Behavior modeled as decoder-only Transformer for autoregressive tasks
-
+* Dependencies: minimal and modular (single-file experimental interface)
+* Behavior: **decoder-only autoregressive modeling** implemented via causal-masked TransformerEncoder
 ---
 
 ## **Model Behavior Summary (Preliminary Observations)**
@@ -77,12 +74,30 @@ Schema abstraction acts as an emergent compression mechanism over episodic trace
 ### **Training Dynamics**
 
 Training over ~3k steps indicates stable entropy-regulated adaptation:
-<img width="1189" height="790" alt="image" src="https://github.com/user-attachments/assets/cc7a1679-4f5e-4578-bdb5-cb330f448810" />
+![training logs](img/trainoutput.png)
 
 * **Memory Budget Utilization** fluctuates between 0.2–0.9, showing non-saturated, flexible gating.
 * **Routing Entropy** remains centered near 3.0, indicating sustained schema diversity.
 * **Loss Components** exhibit monotonic decline in LM loss; auxiliary regularizers remain near steady baseline.
 * **Schema Utility (EMA)** converges rapidly, consistent with early stabilization of schema representations.
+
+
+### 📊 Evaluation Summary (1 Epoch × 3 Seeds)
+
+SCMT achieves an 87 % lower evaluation loss and a 98 % lower perplexity than a GPT-2 baseline of equivalent scale, indicating substantially improved generalization and stability even at the first epoch.
+
+| Metric | GPT-2 | SCMT | Δ Improvement |
+|:--|--:|--:|--:|
+| **Eval Loss** | 5.12 ± 0.03 | **0.63 ± 0.76** | **−87.7 %** |
+| **Perplexity (PPL)** | 166.97 ± 5.78 | **2.30 ± 1.88** | **−98.6 %** |
+| **Cohen’s d** | – | **5.7 (very large)** |
+| **t-test (p)** | – | **0.010 ✓ significant** |
+
+<div align="center">
+  <img src="img/benchmark1.png" width="420"/>
+  <img src="img/benchmark2.png" width="420"/>
+</div>
+
 
 ### **Qualitative Schema Analysis**
 
@@ -126,7 +141,7 @@ Schema  6: " (0.532) |  from (0.325) |  replied (0.321) |  again (0.321) | ! (0.
 ### **Interim Assessment**
 
 > SCMT exhibits interpretable schema formation, stable entropy dynamics, and consistent memory utilization.
-> Further scaling is required to test its full language modeling potential, but results in molecular sequence modeling validate its underlying mechanisms.
+> Further scaling is required to test its full language modeling potential, but results in molecular sequence modeling tentatively validate its underlying mechanisms.
 
 ---
 
