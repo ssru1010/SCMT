@@ -55,9 +55,7 @@ It is **not suitable for production deployment** and should be used only in cont
 
 ## **Design Rationale**
 
-The architecture pursues a *dialectical balance* between **episodic specificity** and **schematic generality**.
-Entropy functions as a meta-signal guiding **memory updates** and **retrieval modulation**, dynamically reallocating capacity according to uncertainty.
-Schema abstraction arises as an emergent compression over episodic traces, promoting *transferability*, *representation stability*, and *symbolic coherence* within long-horizon learning.
+The architecture pursues a dialectical balance between episodic specificity and schematic generality. Entropy functions as a meta-signal guiding memory updates and retrieval modulation, dynamically reallocating capacity in proportion to uncertainty. Schema abstraction is conceived as a potentially emergent compression over episodic traces, aimed at improving transferability, representational stability, and symbolic coherence in long-horizon learning.
 
 For more elaboration, read [here.](https://ssruai.wordpress.com/2025/10/15/from-attention-to-attentional-memory-an-immanent-evolution-of-self-organizing-memory-in-transformer-systems/)
 
