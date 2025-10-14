@@ -6,7 +6,8 @@ The design encourages compact, reusable representations that can self-organize o
 
 The implementation is **self-contained, modular, and HuggingFace-compatible**, emphasizing **interpretability**, **experimental transparency**, and **research extensibility**.
 
----
+v0.1 Research Preview – October 2025
+
 
 ## **Intended Use**
 
@@ -18,7 +19,7 @@ This model is intended for **research exploration** in:
 
 It is **not suitable for production deployment** and should be used only in controlled research environments.
 
----
+
 
 ## **Architectural Summary**
 
@@ -32,7 +33,7 @@ It is **not suitable for production deployment** and should be used only in cont
 | **Auxiliary Heads**  | Lightweight scalar regularizers enforcing entropy smoothness, L2 importance stability, and schema-utility consistency. |
 | **Generation Head**  | Shared-weight LM head supporting temperature, top-k/top-p filtering, and repetition penalties.                         |
 
----
+
 
 ## **Configuration (`SOMTConfig`)**
 
@@ -50,7 +51,7 @@ It is **not suitable for production deployment** and should be used only in cont
 | `l2_importance_coef`  | 1e-4    | Coefficient for L2 importance regularization.  |
 | `schema_utility_coef` | 1e-2    | Coefficient for schema-utility objective.      |
 
----
+
 
 ## **Design Rationale**
 
@@ -58,7 +59,8 @@ The architecture pursues a *dialectical balance* between **episodic specificity*
 Entropy functions as a meta-signal guiding **memory updates** and **retrieval modulation**, dynamically reallocating capacity according to uncertainty.
 Schema abstraction arises as an emergent compression over episodic traces, promoting *transferability*, *representation stability*, and *symbolic coherence* within long-horizon learning.
 
----
+For more elaboration, read [here.](https://ssruai.wordpress.com/2025/10/15/from-attention-to-attentional-memory-an-immanent-evolution-of-self-organizing-memory-in-transformer-systems/)
+
 
 ## **Implementation Notes**
 
@@ -67,7 +69,17 @@ Schema abstraction arises as an emergent compression over episodic traces, promo
 * Generation: supports temperature, top-k/top-p, and repetition penalties
 * Dependencies: minimal and modular (single-file experimental interface)
 * Behavior: **decoder-only autoregressive modeling** implemented via causal-masked TransformerEncoder
----
+
+
+## **Usage**
+
+See `example_usage_interpret.ipynb` for generation and interpretability analysis
+
+Example command for training on molecular generation task:
+
+```sh
+train_mol_unified.py --model-type somt --save-dir ./checkpoints/somt_mol_run_0 --seed 2025 --epochs 3 --seq-len 90 --batch-size 8 --lr 2e-4 --data ./data/test.csv
+```
 
 ## **Model Behavior Summary (Preliminary Observations)**
 
@@ -82,9 +94,10 @@ Training over ~3k steps indicates stable entropy-regulated adaptation:
 * **Schema Utility (EMA)** converges rapidly, consistent with early stabilization of schema representations.
 
 
-### 📊 Evaluation Summary (1 Epoch × 3 Seeds)
+### 📊 Evaluation 
 
-SCMT achieves an 87 % lower evaluation loss and a 98 % lower perplexity than a GPT-2 baseline of equivalent scale, indicating substantially improved generalization and stability even at the first epoch.
+## 1 Epoch 3 Seeds
+**Benchmark:** Molecular SELFIES generation (1 epochs × 3 seeds)
 
 | Metric | GPT-2 | SCMT | Δ Improvement |
 |:--|--:|--:|--:|
@@ -93,11 +106,26 @@ SCMT achieves an 87 % lower evaluation loss and a 98 % lower perplexity than a G
 | **Cohen’s d** | – | **5.7 (very large)** |
 | **t-test (p)** | – | **0.010 ✓ significant** |
 
-<div align="center">
+<div align="left">
   <img src="img/benchmark1.png" width="420"/>
   <img src="img/benchmark2.png" width="420"/>
 </div>
 
+
+#### 3 Epochs 3 Seeds
+**Benchmark:** Molecular SELFIES generation (3 epochs × 3 seeds)
+
+| Model | Eval Loss ± Std | PPL ± Std | Δ Loss Improvement | Cohen’s *d* | *p*-value |
+|:--|--:|--:|--:|--:|--:|
+| GPT-2 baseline | 5.545 ± 0.011 | 255.98 ± 2.73 | — | — | — |
+| **SCMT (SOMT)** | **0.597 ± 0.527** | **2.00 ± 1.14** | **− 89.2 %** | **9.26** | **0.0039 ✓** |
+
+<div align="left">
+  <img src="img/benchmark3_1.png" width="420"/>
+  <img src="img/benchmark3_2.png" width="420"/>
+</div> 
+
+> Summary: SCMT achieves stable, entropy-regulated convergence and dramatically improved generalization compared with a parameter-matched GPT-2-scale baseline. While SCMT carries an ≈ 11 % parameter overhead (3.77 M vs 3.39 M), its backbone dimensions and runtime cost remain in the same computational regime as the GPT-2 baseline.
 
 ### **Qualitative Schema Analysis**
 
@@ -143,7 +171,6 @@ Schema  6: " (0.532) |  from (0.325) |  replied (0.321) |  again (0.321) | ! (0.
 > SCMT exhibits interpretable schema formation, stable entropy dynamics, and consistent memory utilization.
 > Further scaling is required to test its full language modeling potential, but results in molecular sequence modeling tentatively validate its underlying mechanisms.
 
----
 
 ## **Current Status**
 
@@ -157,7 +184,7 @@ Schema  6: " (0.532) |  from (0.325) |  replied (0.321) |  again (0.321) | ! (0.
 | Benchmarks              | 🚧 In Progress             |
 | Safety & Fairness       | ❌ Not Assessed             |
 
----
+
 
 ## **Citation**
 ```bibtex

@@ -60,7 +60,7 @@ def build_gpt2(vocab_size, d_model=256, nhead=8, num_layers=4, max_len=256):
         vocab_size=vocab_size,
         n_embd=d_model, n_head=nhead, n_layer=num_layers,
         n_positions=max_len,
-        bos_token_id=0, eos_token_id=1, pad_token_id=0
+        bos_token_id=0, eos_token_id=1, pad_token_id=2
     )
     return GPT2LMHeadModel(cfg)
 

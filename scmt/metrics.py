@@ -8,8 +8,7 @@ def perplexity_from_loss(loss):
 
 # SELFIES validity placeholder: user must provide validator or use selfies lib
 def is_valid_selfies(selfies_str):
-    # Placeholder: integrate your SELFIES validator here.
-    # e.g., import selfies; try: selfies.decoder(selfies_str) -> if works return True
+    # import selfies; try: selfies.decoder(selfies_str) -> if works return True
     try:
         import selfies as sf
         _ = sf.decoder(selfies_str.replace(" ", ""))
