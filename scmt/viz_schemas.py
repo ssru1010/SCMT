@@ -11,8 +11,8 @@ import os, json, argparse
 import torch
 import pandas as pd
 import torch.nn.functional as F
-from modeling_somt import SchemaAugmentedSOMT, SOMTConfig
-from modeling_utils import visualize_schemas as _base_visualize
+from .modeling_somt import SchemaAugmentedSOMT, SOMTConfig
+from .modeling_utils import visualize_schemas as _base_visualize
 
 # -----------------------------------------------
 # Utility: Mask common/stop tokens

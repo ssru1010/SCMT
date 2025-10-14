@@ -13,8 +13,8 @@ import torch.nn.functional as F
 import matplotlib.pyplot as plt
 import numpy as np
 
-from modeling_somt import SchemaAugmentedSOMT
-from modeling_utils import top_k_top_p_filtering
+from .modeling_somt import SchemaAugmentedSOMT
+from .modeling_utils import top_k_top_p_filtering
 
 
 @torch.no_grad()

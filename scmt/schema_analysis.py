@@ -14,8 +14,8 @@ import torch.nn.functional as F
 from sklearn.manifold import TSNE
 from sklearn.cluster import KMeans
 
-from modeling_somt import SchemaAugmentedSOMT
-from modeling_utils import visualize_schemas
+from .modeling_somt import SchemaAugmentedSOMT
+from .modeling_utils import visualize_schemas
 
 
 # -----------------------------------------------

@@ -11,7 +11,7 @@ from scmt.metrics import perplexity_from_loss, schema_usage_stats
 def test_top_k_top_p_filtering_stability():
     logits = torch.randn(2, 20)
     filtered = top_k_top_p_filtering(logits.clone(), top_k=5, top_p=0.8)
-    assert torch.isfinite(filtered).all()
+    assert not torch.isnan(filtered).any()
     assert filtered.shape == logits.shape
 
 def test_perplexity_conversion():

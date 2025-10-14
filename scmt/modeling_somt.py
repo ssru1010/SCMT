@@ -68,7 +68,8 @@ class SOMTPreTrainedModel(nn.Module):
         torch.save(self.state_dict(), state_path)
 
     def get_config(self) -> SOMTConfig:
-        raise NotImplementedError
+        return self.config
+
 
 
 class SchemaAugmentedSOMT(SOMTPreTrainedModel):
