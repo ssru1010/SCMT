@@ -192,186 +192,173 @@ class SchemaAugmentedSOMT(SOMTPreTrainedModel):
         schema_reps = torch.einsum('bms,bmd->bsd', routing_probs, mem_keys)
         return schema_reps, routing_probs
 
-    def forward(self, x: torch.Tensor, memory_keys: Optional[torch.Tensor] = None, memory_vals: Optional[torch.Tensor] = None, memory_age: Optional[torch.Tensor] = None) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, Dict[str, torch.Tensor]]:
-        """Forward pass.
-        Args:
-        x: (B, L) token ids.
-        memory_*: previous episodic memory states.
+    def forward(self, x: torch.Tensor,
+                memory_keys: Optional[torch.Tensor] = None,
+                memory_vals: Optional[torch.Tensor] = None,
+                memory_age: Optional[torch.Tensor] = None,
+                precomputed_entropy_norm: Optional[torch.Tensor] = None,
+                precomputed_dynamic_threshold: Optional[torch.Tensor] = None,
+                step_mode: bool = False,
+                ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, Dict[str, torch.Tensor]]:
 
-
-        Returns:
-        logits: model predictions
-        updated_{keys,vals,age}: refreshed episodic memory states
-        aux: diagnostic regularization metrics (entropy/L2/schema utility)
-        """
         B, L = x.shape
         device = x.device
 
-        # ---- Encoding ----
+        # ---- Explicit causal mask for encoder (critical fix) ----
+        causal_attn_mask = self._causal_mask(L, device)  # (L, L), True = mask
+
+        # ---- Encoding with explicit mask ----
         x_emb = self.embed(x) + self.pos_embed[:, :L]
-        encoded = self.encoder(x_emb, mask=self._causal_mask(L, device))
+        encoded = self.encoder(x_emb, mask=causal_attn_mask)  # now guaranteed causal
 
         # ---- Compute token-level entropy as uncertainty measure ----
         base_logits = self.lm_head(encoded)
         probs = F.softmax(base_logits.detach(), dim=-1)
-        entropy = -torch.sum(probs * torch.log(probs + 1e-12), dim=-1)
-        e_min = entropy.min(dim=1, keepdim=True).values
-        e_max = entropy.max(dim=1, keepdim=True).values
-        entropy_norm = (entropy - e_min) / (e_max - e_min + 1e-12)
+        entropy = -torch.sum(probs * torch.log(probs + 1e-12), dim=-1)  # (B, L)
+
+        if precomputed_entropy_norm is None:
+            e_mean = entropy.mean(dim=1, keepdim=True)
+            e_std = entropy.std(dim=1, keepdim=True) + 1e-12
+            entropy_norm = torch.sigmoid((entropy - e_mean) / e_std)
+        else:
+            entropy_norm = precomputed_entropy_norm.to(device)
 
         # ---- Uncertainty gating and thresholding ----
         uncertainty_factor = self.uncertainty_gate(encoded)
         queries = self.query_proj(encoded) * (1 + uncertainty_factor)
 
-        avg_ent = entropy_norm.mean(dim=1, keepdim=True)
-        max_ent = entropy_norm.max(dim=1, keepdim=True).values
-        thresh_input = torch.cat([encoded, avg_ent.unsqueeze(1).expand(-1, L, -1), max_ent.unsqueeze(1).expand(-1, L, -1)], dim=-1)
+        cumulative_sum = torch.cumsum(entropy_norm, dim=1)
+        steps = torch.arange(1, L + 1, device=device).float().unsqueeze(0)
+        causal_mean = cumulative_sum / steps
+        causal_max, _ = torch.cummax(entropy_norm, dim=1)
+
+        thresh_input = torch.cat(
+            [encoded, causal_mean.unsqueeze(-1), causal_max.unsqueeze(-1)], dim=-1
+        )
         dynamic_threshold = self.threshold_net(thresh_input).squeeze(-1)
+
+        if precomputed_dynamic_threshold is not None:
+            dynamic_threshold = precomputed_dynamic_threshold.to(device)
 
         batch_context = encoded.mean(dim=1)
         budget_frac = self.budget_controller(batch_context).squeeze(-1)
 
-        # ---- Episodic memory write/prune ----
+        # ---- Episodic memory write/prune (causally safe) ----
         if memory_keys is None:
             memory_keys = torch.empty(B, 0, self.d_model, device=device)
             memory_vals = torch.empty(B, 0, self.d_model, device=device)
             memory_age = torch.empty(B, 0, device=device)
 
         updated_keys_list, updated_vals_list, updated_age_list = [], [], []
+        updated_times_list = []
         entropy_reg_total = torch.tensor(0.0, device=device)
         l2_importance_total = torch.tensor(0.0, device=device)
 
         for b in range(B):
-            mask = entropy_norm[b] > dynamic_threshold[b]
-            if mask.any():
-                candidate_k = self.key_proj(encoded[b][mask])
-                candidate_v = self.value_proj(x_emb[b][mask])
-                candidate_age = torch.zeros(candidate_k.size(0), device=device)
-            else:
-                candidate_k = torch.empty(0, self.d_model, device=device)
-                candidate_v = torch.empty(0, self.d_model, device=device)
-                candidate_age = torch.empty(0, device=device)
-
-            # Merge with old memory, apply recency decay and pruning
             old_k = memory_keys[b] if memory_keys.size(1) > 0 else torch.empty(0, self.d_model, device=device)
             old_v = memory_vals[b] if memory_vals.size(1) > 0 else torch.empty(0, self.d_model, device=device)
-            old_age = (memory_age[b] + 1) if memory_age.size(1) > 0 else torch.empty(0, device=device)
+            old_age = memory_age[b] if memory_age.size(1) > 0 else torch.empty(0, device=device)
 
-            if old_k.numel() == 0:
-                combined_k = candidate_k
-                combined_v = candidate_v
-                combined_age = candidate_age
+            mem_k = old_k.clone() if old_k.numel() else torch.empty(0, self.d_model, device=device)
+            mem_v = old_v.clone() if old_v.numel() else torch.empty(0, self.d_model, device=device)
+            mem_a = old_age.clone() if old_age.numel() else torch.empty(0, device=device)
+
+            if old_age.numel():
+                mem_times = old_age.clone().long().to(device)
             else:
-                combined_k = torch.cat([old_k, candidate_k], dim=0)
-                combined_v = torch.cat([old_v, candidate_v], dim=0)
-                combined_age = torch.cat([old_age, candidate_age], dim=0)
+                mem_times = torch.empty(0, dtype=torch.long, device=device)
 
-            # Importance filtering if memory exceeds capacity
-            n_total = combined_k.size(0)
-            if n_total > self.mem_size:
-                importance = self.importance_net(combined_k).squeeze(-1)
+            time_steps = [L - 1] if step_mode else range(L)
+            for t in time_steps:
+                ent_t = entropy_norm[b, t]
+                thr_t = dynamic_threshold[b, t]
+                if ent_t > thr_t:
+                    cand_k = self.key_proj(encoded[b, t:t+1])
+                    cand_v = self.value_proj(x_emb[b, t:t+1])
+                    cand_a = torch.zeros(1, device=device)
 
-                if old_k.size(0) > 0:
-                    obsolescence_scores = self.obsolescence_net(old_k).squeeze(-1)
-                    age_penalty = old_age.float() * obsolescence_scores
-                    full_penalty = torch.cat([age_penalty, torch.zeros(candidate_k.size(0), device=device)], dim=0)
-                    importance = importance - full_penalty
+                    mem_k = torch.cat([mem_k, cand_k], dim=0) if mem_k.numel() else cand_k.clone()
+                    mem_v = torch.cat([mem_v, cand_v], dim=0) if mem_v.numel() else cand_v.clone()
+                    mem_a = torch.cat([mem_a, cand_a], dim=0) if mem_a.numel() else cand_a.clone()
+                    t_tensor = torch.full((1,), t, dtype=torch.long, device=device)
+                    mem_times = torch.cat([mem_times, t_tensor], dim=0) if mem_times.numel() else t_tensor.clone()
 
-                if candidate_k.size(0) > 0:
-                    recency_bonus = torch.zeros_like(importance)
-                    new_idx = torch.arange(n_total - candidate_k.size(0), n_total, device=device)
-                    recency_bonus[new_idx] = torch.linspace(1.0, 0.1, steps=candidate_k.size(0), device=device)
-                    importance += self.recency_lambda * recency_bonus
+                if mem_a.numel() > 0:
+                    mem_a = mem_a + 1
 
-                probs_imp = F.softmax(importance, dim=0)
-                entropy_reg_total += (-torch.sum(probs_imp * torch.log(probs_imp + 1e-12)))
-                l2_importance_total += torch.mean(importance ** 2)
+                if mem_k.size(0) > self.mem_size:
+                    importance = self.importance_net(mem_k).squeeze(-1)
+                    if mem_times.numel() > 0:
+                        age_slots = (t - mem_times).float().clamp(min=0.0)
+                        obsolescence_scores = self.obsolescence_net(mem_k).squeeze(-1)
+                        age_penalty = age_slots * obsolescence_scores
+                        importance = importance - age_penalty
+                    topk = min(self.mem_size, importance.size(0))
+                    _, top_idx = torch.topk(importance, k=topk, largest=True)
+                    mem_k = mem_k[top_idx]
+                    mem_v = mem_v[top_idx]
+                    mem_a = mem_a[top_idx]
+                    mem_times = mem_times[top_idx]
 
-                _, topk_idx = torch.topk(importance, k=self.mem_size, largest=True)
-                combined_k = combined_k[topk_idx]
-                combined_v = combined_v[topk_idx]
-                combined_age = combined_age[topk_idx]
-
-            # Pad to uniform memory size per batch
-            pad_len = self.mem_size - combined_k.size(0)
+            pad_len = self.mem_size - mem_k.size(0)
             if pad_len > 0:
-                pad_k = torch.vstack([combined_k, torch.zeros(pad_len, self.d_model, device=device)])
-                pad_v = torch.vstack([combined_v, torch.zeros(pad_len, self.d_model, device=device)])
-                pad_age = torch.cat([combined_age, torch.zeros(pad_len, device=device)])
+                pad_k = torch.cat([mem_k, torch.zeros(pad_len, self.d_model, device=device)], dim=0) if mem_k.numel() else torch.zeros(self.mem_size, self.d_model, device=device)
+                pad_v = torch.cat([mem_v, torch.zeros(pad_len, self.d_model, device=device)], dim=0) if mem_v.numel() else torch.zeros(self.mem_size, self.d_model, device=device)
+                pad_a = torch.cat([mem_a, torch.zeros(pad_len, device=device)], dim=0) if mem_a.numel() else torch.zeros(self.mem_size, device=device)
+                future_pad = torch.full((pad_len,), 10**9, dtype=torch.long, device=device)
+                pad_times = torch.cat([mem_times, future_pad], dim=0) if mem_times.numel() else torch.full((self.mem_size,), 10**9, dtype=torch.long, device=device)
             else:
-                pad_k = combined_k
-                pad_v = combined_v
-                pad_age = combined_age
+                pad_k, pad_v, pad_a = mem_k, mem_v, mem_a
+                pad_times = mem_times
 
             updated_keys_list.append(pad_k)
             updated_vals_list.append(pad_v)
-            updated_age_list.append(pad_age)
+            updated_age_list.append(pad_a)
+            updated_times_list.append(pad_times)
 
         updated_keys = torch.stack(updated_keys_list, dim=0)
         updated_vals = torch.stack(updated_vals_list, dim=0)
         updated_age = torch.stack(updated_age_list, dim=0)
+        updated_times = torch.stack(updated_times_list, dim=0)
 
-        # ---- Schema abstraction ----
+        # ---- Causal retrieval & schema abstraction ----
         schema_utility_loss = torch.tensor(0.0, device=device)
-        final_context = torch.zeros_like(encoded)
 
-        if self.training and updated_keys.size(1) > 0:
-            batch_schema_keys, routing_probs = self._form_schemas(updated_keys, updated_vals)
-            with torch.no_grad():
-                batch_mean = batch_schema_keys.mean(dim=0)
-                # EMA update to persistent schema keys
-                self.schema_keys = 0.99 * self.schema_keys + 0.01 * batch_mean
-                self.schema_vals = self.schema_keys.clone()
+        # Build causal retrieval mask: block memory written AFTER current time step
+        time_idx = torch.arange(L, device=device).unsqueeze(0).unsqueeze(-1)      # (1, L, 1)
+        mem_times_exp = updated_times.unsqueeze(1)                                # (B, 1, M)
+        retrieval_block_mask = mem_times_exp > time_idx                           # (B, L, M)
 
-            current_schema_keys = self.schema_keys.unsqueeze(0).expand(B, -1, -1)
-            schema_scores = torch.matmul(queries, current_schema_keys.transpose(-2, -1)) / math.sqrt(self.d_model)
-            schema_weights = F.softmax(schema_scores, dim=-1)
-            schema_context = torch.matmul(schema_weights, current_schema_keys)
+        # Instance-level retrieval
+        instance_scores = torch.bmm(queries, updated_keys.transpose(1, 2)) / math.sqrt(self.d_model)
+        instance_scores = instance_scores.masked_fill(retrieval_block_mask, float('-inf'))
+        instance_weights = F.softmax(instance_scores, dim=-1)
+        instance_weights = torch.nan_to_num(instance_weights, nan=0.0)
+        instance_context = torch.bmm(instance_weights, updated_vals)
 
-            instance_scores = torch.bmm(queries, updated_keys.transpose(1, 2)) / math.sqrt(self.d_model)
-            instance_weights = F.softmax(instance_scores, dim=-1)
-            instance_context = torch.bmm(instance_weights, updated_vals)
+        # Schema-level retrieval (uses static schema bank — as in original)
+        current_schema_keys = self.schema_keys.unsqueeze(0).expand(B, -1, -1)
+        schema_scores = torch.matmul(queries, current_schema_keys.transpose(-2, -1)) / math.sqrt(self.d_model)
+        schema_weights = F.softmax(schema_scores, dim=-1)
+        schema_context = torch.matmul(schema_weights, self.schema_vals.unsqueeze(0).expand(B, -1, -1))
 
-            fused_context = schema_context + instance_context
-            final_context = self.retrieval_fuse(self.mem_dropout(fused_context))
+        # Fuse contexts
+        fused_context = self.retrieval_fuse(self.mem_dropout(schema_context + instance_context))
+        encoded = encoded + fused_context
 
-            # Schema utility regression: predict entropy reduction
-            with torch.no_grad():
-                enhanced_logits = self.lm_head(encoded + final_context)
-                enhanced_probs = F.softmax(enhanced_logits, dim=-1)
-                enhanced_entropy = -torch.sum(enhanced_probs * torch.log(enhanced_probs + 1e-12), dim=-1)
-                entropy_reduction = entropy_norm - enhanced_entropy
-                target_utility = entropy_reduction.mean().clamp(min=0)
-
-            pred_utility = self.schema_utility_head(current_schema_keys.mean(dim=1)).mean()
-            schema_utility_loss = (pred_utility - target_utility) ** 2
-
-        elif updated_keys.size(1) > 0:
-            # Inference mode schema retrieval (no updates)
-            current_schema_keys = self.schema_keys.unsqueeze(0).expand(B, -1, -1)
-            schema_scores = torch.matmul(queries, current_schema_keys.transpose(-2, -1)) / math.sqrt(self.d_model)
-            schema_weights = F.softmax(schema_scores, dim=-1)
-            schema_context = torch.matmul(schema_weights, current_schema_keys)
-
-            instance_scores = torch.bmm(queries, updated_keys.transpose(1, 2)) / math.sqrt(self.d_model)
-            instance_weights = F.softmax(instance_scores, dim=-1)
-            instance_context = torch.bmm(instance_weights, updated_vals)
-
-            fused_context = schema_context + instance_context
-            final_context = self.retrieval_fuse(self.mem_dropout(fused_context))
-
-        # ---- Output prediction ----
-        encoded = encoded + final_context
         logits = self.lm_head(encoded)
 
-        # ---- Regularization metrics ----
         aux = {
             "importance_entropy": entropy_reg_total * self.entropy_reg_coef,
             "importance_l2": l2_importance_total * self.l2_importance_coef,
             "schema_utility": schema_utility_loss * self.schema_utility_coef,
+            "entropy_norm": entropy_norm.detach(),
+            "dynamic_threshold": dynamic_threshold.detach(),
+            "memory_timestamps": updated_times.detach(),
         }
 
         return logits, updated_keys, updated_vals, updated_age, aux
+
 
     # Wrapper expected by HF users
     @torch.no_grad()
