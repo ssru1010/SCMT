@@ -83,13 +83,31 @@ train_mol_unified.py --model-type somt --save-dir ./checkpoints/somt_mol_run_0 -
 
 ### **Training Dynamics**
 
-Training over ~3k steps indicates stable entropy-regulated adaptation:
-![training logs](img/trainoutput.png)
+#### 📊 Training Stats
+- **Train set**: 21,732 samples
+- **Test set**: 2,415 samples
+- **Vocab size**: 793 tokens
 
-* **Memory Budget Utilization** fluctuates between 0.2–0.9, showing non-saturated, flexible gating.
-* **Routing Entropy** remains centered near 3.0, indicating sustained schema diversity.
-* **Loss Components** exhibit monotonic decline in LM loss; auxiliary regularizers remain near steady baseline.
-* **Schema Utility (EMA)** converges rapidly, consistent with early stabilization of schema representations.
+### 🔍 Losses & Metrics
+| Metric             | Value     |
+|--------------------|-----------|
+| Train Loss         | 2.146     |
+| Eval Loss          | 1.684     |
+| Perplexity (PPL)   | 5.39      |
+
+#### 🖼️ Training Curves
+
+Training over ~2717 k steps indicates stable entropy-regulated adaptation:
+![Training Plots](img/trainoutput.png)  
+*(Memory Budget, Schema Utility, LM Loss, Aux Losses)*
+
+#### 🧪 Sample Learned Schema
+
+- Schema 0:
+  ![Schema_0](img/schema0.png)  
+
+- Schema 1:
+  ![Schema_0](img/schema1.png)  
 
 
 ### 📊 Evaluation 

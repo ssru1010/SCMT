@@ -331,7 +331,7 @@ class SchemaAugmentedSOMT(SOMTPreTrainedModel):
         # Minor numerical leakage (<1e-3) may occur under dense memory conditions but does not compromise autoregressive integrity in practice.
         # double masking and -1e9 instead of -inf is used to limit this small numerical leakage
         # The leak is caused by offline simulation of an online memory process, leading to numerical causality violations under high memory utilization
-        instance_scores = instance_scores.masked_fill(retrieval_block_mask, -1e9)
+        instance_scores = instance_scores.masked_fill(retrieval_block_mask, -1e4)
         instance_weights = F.softmax(instance_scores, dim=-1)
         instance_weights = torch.nan_to_num(instance_weights, nan=0.0)
 
