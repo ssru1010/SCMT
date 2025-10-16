@@ -328,7 +328,7 @@ class SchemaAugmentedSOMT(SOMTPreTrainedModel):
         retrieval_block_mask = mem_times_exp > (time_idx + global_pos_offset)     # PATCH: include offset in mask
 
         instance_scores = torch.bmm(queries, updated_keys.transpose(1, 2)) / math.sqrt(self.d_model)
-        instance_scores = instance_scores.masked_fill(retrieval_block_mask, float('-inf'))
+        instance_scores = instance_scores.masked_fill(retrieval_block_mask, -1e9)
         instance_weights = F.softmax(instance_scores, dim=-1)
         instance_weights = torch.nan_to_num(instance_weights, nan=0.0)
         instance_context = torch.bmm(instance_weights, updated_vals)
