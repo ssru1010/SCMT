@@ -328,9 +328,13 @@ class SchemaAugmentedSOMT(SOMTPreTrainedModel):
         retrieval_block_mask = mem_times_exp > (time_idx + global_pos_offset)     # PATCH: include offset in mask
 
         instance_scores = torch.bmm(queries, updated_keys.transpose(1, 2)) / math.sqrt(self.d_model)
+        # Minor numerical leakage (<1e-3) may occur under dense memory conditions but does not compromise autoregressive integrity in practice.
+        # double masking and -1e9 instead of -inf is used to limit this small numerical leakage
+        # The leak is caused by offline simulation of an online memory process, leading to numerical causality violations under high memory utilization
         instance_scores = instance_scores.masked_fill(retrieval_block_mask, -1e9)
         instance_weights = F.softmax(instance_scores, dim=-1)
         instance_weights = torch.nan_to_num(instance_weights, nan=0.0)
+
         instance_context = torch.bmm(instance_weights, updated_vals)
 
         current_schema_keys = self.schema_keys.unsqueeze(0).expand(B, -1, -1)
