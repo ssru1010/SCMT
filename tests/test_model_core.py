@@ -77,7 +77,7 @@ def test_memory_budget_range():
         d_model=32,
         nhead=2,
         num_layers=2,
-        max_len=20,
+        max_len=25,
         mem_size=16,
         num_schemas=4,
     )

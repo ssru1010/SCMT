@@ -179,8 +179,9 @@ class SchemaAugmentedSOMT(SOMTPreTrainedModel):
             nn.init.normal_(m.weight, std=0.02)
 
     def _causal_mask(self, L, device):
-        """Create upper-triangular causal mask for autoregressive attention."""
-        return torch.triu(torch.ones(L, L, device=device), diagonal=1).bool()
+        """Create additive causal mask: -inf for future positions, 0 for allowed."""
+        mask = torch.triu(torch.full((L, L), float('-inf'), device=device), diagonal=1)
+        return mask
 
     def forward(self, x: torch.Tensor,
                 memory_keys: Optional[torch.Tensor] = None,
