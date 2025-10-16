@@ -45,12 +45,10 @@ class SelfiesDataset(Dataset):
     def __getitem__(self, idx):
         toks = self.tokenizer.encode(self.texts[idx])
         toks = toks[:self.seq_len]
-        pad_id = getattr(self.tokenizer, "pad_token_id", 0)
+        pad_id = self.tokenizer.pad_token_id  # = 2
         if len(toks) < self.seq_len:
-            toks += [pad_id]*(self.seq_len - len(toks))
-        x = torch.tensor(toks, dtype=torch.long)
-        y = torch.roll(x, shifts=-1, dims=0)
-        return x, y
+            toks += [pad_id] * (self.seq_len - len(toks))
+        return torch.tensor(toks, dtype=torch.long)  # shape: [seq_len]
 
 # ----------------------------
 # 2. Model Builders
@@ -75,26 +73,41 @@ def build_somt(vocab_size, d_model=256, nhead=8, num_layers=4, max_len=256, mem_
 # 3. Evaluation
 # ----------------------------
 @torch.no_grad()
+# --- Inside evaluate() ---
+@torch.no_grad()
 def evaluate(model, loader, criterion, device, vocab_size):
     model.eval()
     total_loss = 0
-    for x, y in loader:
-        x, y = x.to(device), y.to(device)
-        if hasattr(model, "schema_keys"):
+    for x in loader:
+        x = x.to(device)
+
+        if hasattr(model, "schema_keys"):  # somt
             logits, *_ = model(x)
         else:
-            out = model(x, labels=y)
+            out = model(x, labels=None)  # don't pass labels
             logits = out.logits
-        loss = criterion(logits.view(-1, vocab_size), y.view(-1))
+
+        # Shift for autoregressive prediction
+        shift_logits = logits[:, :-1, :].contiguous()
+        shift_labels = x[:, 1:].contiguous()
+
+        loss = criterion(shift_logits.view(-1, vocab_size), shift_labels.view(-1))
         total_loss += loss.item()
+
     avg_loss = total_loss / len(loader)
     return avg_loss, math.exp(avg_loss)
+
 
 # ----------------------------
 # 4. Training Loop
 # ----------------------------
+from torch.cuda.amp import autocast, GradScaler
+
+from torch.cuda.amp import autocast, GradScaler
+
 def train(model, tokenizer, train_loader, test_loader, device, epochs=1, lr=2e-4, model_type="somt"):
-    opt = torch.optim.AdamW(model.parameters(), lr=lr, betas=(0.9,0.95), weight_decay=0.01)
+    opt = torch.optim.AdamW(model.parameters(), lr=lr, betas=(0.9, 0.95), weight_decay=0.01)
+    scaler = GradScaler()
     criterion = nn.CrossEntropyLoss(ignore_index=tokenizer.pad_token_id)
 
     metrics = {k: [] for k in [
@@ -103,28 +116,48 @@ def train(model, tokenizer, train_loader, test_loader, device, epochs=1, lr=2e-4
     ]}
 
     for ep in range(epochs):
-        model.train(); total_loss = 0
+        model.train()
+        total_loss = 0
         pbar = tqdm(train_loader, desc=f"Epoch {ep+1}/{epochs}", leave=False)
 
-        for x, y in pbar:
-            x, y = x.to(device), y.to(device)
+        for batch in pbar:
+            x = batch.to(device)
             opt.zero_grad()
 
-            if model_type == "somt":
-                logits, _, _, _, aux = model(x)
-                loss = criterion(logits.view(-1, model.config.vocab_size), y.view(-1))
-                total_aux = sum(aux.values())
-                (loss + total_aux).backward()
-            else:
-                out = model(x, labels=y)
-                loss = out.loss
-                loss.backward()
+            with autocast():
+                if model_type == "somt":
+                    logits, _, _, _, aux = model(x)
+                else:
+                    out = model(x, labels=None)  # no labels; manual loss
+                    logits = out.logits
 
-            opt.step()
+                # Shift for autoregressive loss
+                shift_logits = logits[:, :-1, :].contiguous()
+                shift_labels = x[:, 1:].contiguous()
+
+                loss = criterion(
+                    shift_logits.view(-1, model.config.vocab_size),
+                    shift_labels.view(-1)
+                )
+
+                if model_type == "somt":
+                    total_aux = (
+                        aux["importance_entropy"] +
+                        aux["importance_l2"] +
+                        aux["schema_utility"]
+                    )
+                    total_loss_combined = loss + total_aux
+                else:
+                    total_loss_combined = loss
+
+            scaler.scale(total_loss_combined).backward()
+            scaler.step(opt)
+            scaler.update()
+
             total_loss += loss.item()
             pbar.set_postfix(loss=f"{loss.item():.3f}")
 
-            # metrics tracking
+            # Track metrics
             metrics["lm_loss"].append(loss.item())
             if model_type == "somt":
                 metrics["schema_utility"].append(safe_item(aux.get("schema_utility")))
@@ -136,25 +169,32 @@ def train(model, tokenizer, train_loader, test_loader, device, epochs=1, lr=2e-4
                         bctx = torch.randn(1, model.d_model, device=device)
                         try:
                             metrics["budget"].append(model.budget_controller(bctx).mean().item())
-                        except: pass
+                        except:
+                            pass
 
                 if hasattr(model, "schema_router"):
                     with torch.no_grad():
                         dummy = torch.randn(4, 8, model.d_model, device=device)
                         try:
                             probs = F.softmax(model.schema_router(dummy), dim=-1)
-                            ent = (-probs * torch.log(probs+1e-12)).sum(-1).mean().item()
+                            ent = (-probs * torch.log(probs + 1e-12)).sum(-1).mean().item()
                             metrics["routing_entropy"].append(ent)
-                        except: pass
+                        except:
+                            pass
 
         tr_loss = total_loss / len(train_loader)
-        ev_loss, ppl = evaluate(model, test_loader, criterion, device, model.config.vocab_size if model_type=="somt" else model.config.vocab_size)
+        ev_loss, ppl = evaluate(
+            model, test_loader, criterion, device,
+            model.config.vocab_size if model_type == "somt" else model.config.vocab_size
+        )
+
         metrics["train_loss"].append(tr_loss)
         metrics["eval_loss"].append(ev_loss)
         metrics["ppl"].append(ppl)
         print(f"Epoch {ep+1}: train {tr_loss:.3f} | eval {ev_loss:.3f} | ppl {ppl:.2f}")
 
     return model, metrics
+
 
 # ----------------------------
 # 5. Main Entry
@@ -213,11 +253,26 @@ def main():
         json.dump(metrics, f, indent=2)
     print(f"✅ Metrics saved → {args.save_dir}/metrics.json")
 
+# Plot training curves
     plt.figure(figsize=(8,5))
     plt.plot(metrics["lm_loss"], label="LM Loss")
     if args.model_type == "somt":
         plt.plot(metrics["schema_utility"], label="Schema Utility")
-    plt.xlabel("Step"); plt.ylabel("Loss"); plt.legend(); plt.tight_layout(); plt.show()
+    plt.xlabel("Step")
+    plt.ylabel("Loss")
+    plt.legend()
+    plt.tight_layout()
+
+    # Save instead of show
+        # Save instead of show
+    plot_path = os.path.join(
+        args.save_dir,
+        f"training_plot_{args.model_type}_{args.seed}.png"
+    )
+    plt.savefig(plot_path, dpi=300)
+    plt.close()
+    print(f"📊 Training plot saved → {plot_path}")
+
 
 if __name__ == "__main__":
     main()

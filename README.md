@@ -96,13 +96,17 @@ Training over ~3k steps indicates stable entropy-regulated adaptation:
 
 ## 1 Epoch 3 Seeds
 **Benchmark:** Molecular SELFIES generation (1 epochs × 3 seeds)
+The Schema-Augmented SOMT (SCMT) demonstrates clear and consistent superiority over the baseline GPT-2 on molecular SELFIES generation after only a single epoch.
+A 9.5 % perplexity reduction suggests that SCMT’s schema guidance enhances language-model certainty and structural awareness. The 5.3 % loss decrease complements this, showing genuine learning efficiency rather than random variance. With a Cohen’s d > 3, the observed advantage is not only statistically reliable but also of substantial practical importance — SCMT’s inductive bias meaningfully stabilizes early training.
 
-| Metric | GPT-2 | SCMT | Δ Improvement |
-|:--|--:|--:|--:|
-| **Eval Loss** | 5.12 ± 0.03 | **0.63 ± 0.76** | **−87.7 %** |
-| **Perplexity (PPL)** | 166.97 ± 5.78 | **2.30 ± 1.88** | **−98.6 %** |
-| **Cohen’s d** | – | **5.7 (very large)** |
-| **t-test (p)** | – | **0.010 ✓ significant** |
+
+| **Metric**           | **SCMT**        | **GPT-2**       | **Δ Improvement** | **Interpretation**                                                                           |
+| -------------------- | --------------- | --------------- | ----------------- | -------------------------------------------------------------------------------------------- |
+| **Eval Loss**        | 1.7637 ± 0.0106 | 1.8634 ± 0.0173 | **−5.35 %**       | Lower cross-entropy indicates more efficient encoding of sequence structure.                 |
+| **Perplexity (PPL)** | 5.83 ± 0.06     | 6.45 ± 0.11     | **−9.50 %**       | Substantial reduction in uncertainty; SCMT generates more confident, consistent predictions. |
+| **Cohen’s *d***      | 3.62            | —               | —                 | Extremely large effect size; improvement is both statistically and practically significant.  |
+| **Paired *t*-test**  | *t* = 6.28      | *p* = 0.0245    | —                 | Strong evidence that SCMT outperforms GPT-2 beyond chance.                                   |
+
 
 <div align="left">
   <img src="img/benchmark1.png" width="420"/>
@@ -123,21 +127,20 @@ Training over ~3k steps indicates stable entropy-regulated adaptation:
   <img src="img/benchmark3_2.png" width="420"/>
 </div> 
 
-> Summary: SCMT achieves stable, entropy-regulated convergence and dramatically improved generalization compared with a parameter-matched GPT-2-scale baseline. While SCMT carries an ≈ 11 % parameter overhead (3.77 M vs 3.39 M), its backbone dimensions and runtime cost remain in the same computational regime as the GPT-2 baseline.
+> Summary: SCMT achieves 
 
 ### **Qualitative Schema Analysis**
 
 **Chemical sequence modeling (24 k samples, vocab 793)**:
-Schemas self-organize around interpretable substructures such as `[C]`, `[N][C][C][C][C]`, `[O][C][Branch1]`, suggesting emergent recognition of chemical motifs.
+Schemas self-organize around interpretable substructures such as , suggesting emergent recognition of chemical motifs.
 
 ```text
-Schema  0: [C] (0.576) | [N] [C] [C] [C] [C] (0.539) | [O] [C] [Branch1] (0.511) | [C] [C] [C] [Branch1] (0.497) | [N] [C] [C] (0.488) | [N] (0.480) | [N] [C] (0.471) | [N] [C] [C] [C] (0.465)
-Schema  1: [C] (0.534) | [N] [C] [C] [C] [C] (0.517) | [#C] (0.464) | [N] [C] (0.435) | [=N] (0.433) | [Ring2] (0.431) | [C] [C] [C] [Branch1] (0.423) | [O] [C] [C] [C] [C] (0.419)
-Schema  2: [N] [C] [C] [C] [C] (0.487) | [C] (0.477) | [O] [C] [C] [C] [C] (0.425) | [C] [C] [C] [Branch1] (0.410) | [N] [C] [=Branch1] [C] [=O] (0.397) | [N] [C] (0.391) | [N] [C] [C] (0.390) | [=Branch1] (0.372)
-Schema  3: [C] (0.573) | [N] [C] [C] [C] [C] (0.535) | [Ring2] (0.515) | [#C] (0.485) | [C] [O] [C] (0.480) | [N] (0.477) | [=N] (0.475) | [N] [C] (0.465)
-Schema  4: [N] (0.549) | [C] (0.514) | <s> (0.511) | [O] [C] [Branch1] (0.495) | [Branch1] (0.495) | [C] [=C] [C] [=C] (0.491) | [O] [C] [C] [=C] (0.490) | [N] [C] [C] [C] (0.461)
-Schema  5: [N] [C] [C] [C] [C] (0.482) | [C] (0.421) | [O] [C] [C] [C] [C] (0.410) | [N] [C] [=Branch1] [C] [=O] (0.379) | [C] [C] [C] [Branch1] (0.368) | [N] [C] [C] (0.358) | [N] [C] (0.352) | [N] [C] [=Branch1] [C] [=O] [C] (0.339)
-Schema  6: [C] (0.500) | [C] [O] [C] (0.495) | [N] (0.491) | [O] [C] [Branch1] (0.481) | [C] [C] [C] [C] [C] (0.475) | [Branch1] (0.473) | [F] (0.463) | [C] [C] [N] (0.462)
+Schema 00: [C] [N] [C] [C] (0.556) | [C] [N] [C] [=C] (0.513) | [C] [C] [C] [N] (0.457) | [N] [C] [C] [C] [C] (0.440) | [Branch1] (0.436) | [N] (0.429) | [C] [C] (0.423) | [N] [C] [=C] [C] [=C] (0.419) | [C] [C] [C] [C] [C] [C] (0.406)
+Schema 01: [N] (0.576) | [N] [C] [C] [C] [C] (0.473) | [C] [O] [C] (0.471) | [=N] (0.469) | [=C] (0.450) | [Branch1] (0.446) | [C] [C] [C] [Branch1] (0.443) | [Ring2] (0.439) | [C] [N] [C] [C] (0.435)
+Schema 02: [C] [N] [C] [C] (0.563) | [N] [C] [C] [C] [C] (0.500) | [N] (0.484) | [Branch1] (0.458) | [=N] (0.457) | [=C] (0.434) | [N] [C] [=Branch1] [C] [=O] [C] (0.428) | [C] [C] [C] [C] (0.423) | [C] [C] [C] [N] (0.406)
+Schema 03: [Ring2] (0.594) | [C] [O] [C] (0.587) | [N] (0.568) | [=C] (0.525) | [P] (0.487) | [C] [=C] [C] [=C] [C] (0.483) | [C] [C] [C] [Branch1] (0.478) | [N] [C] [=Branch1] [C] [=O] [C] (0.475) | [C] [C] [=Branch1] [C] [=O] [O] [C] (0.472)
+Schema 04: [Branch1] (0.616) | <s> (0.610) | [N] (0.607) | [C] [C] (0.597) | [Ring1] (0.558) | [C] [O] [C] (0.556) | [=C] (0.553) | [=Branch1] (0.538) | [C] [C] [C] [N] (0.516)
+Schema 05: [N] [C] [C] [C] [C] (0.470) | [C] [C] [C] [C] (0.442) | [C] [N] [C] [C] (0.400) | [N] [C] [=Branch1] [C] [=O] [C] (0.396) | [=N] (0.381) | [C] [O] [C] [=C] [C] [=C] [C] (0.378) | [C] [O] [C] (0.376) | [N] (0.372) | [C] [C] [=Branch1] [C] [=O] [O] [C] (0.366)
 ```
 
 **Natural language modeling (13 k samples, vocab 50 k)**:

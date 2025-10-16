@@ -8,7 +8,7 @@ and extensibility.
 
 G,, Q., & V. (2025). Schema-Augmented Self-Optimizing Memory Transformer (SCMT).
 Sublation Systems Research Unit (SSRU). Experimental Research Prototype.
-Version 0.1.0 — https://github.com/ssru1010/SCMT
+Version 0.1.1 — https://github.com/ssru1010/SCMT  
 
 SchemaAugmentedSOMT modular model file.
 Contains:
@@ -18,7 +18,6 @@ Contains:
 
 This file is intentionally self-contained and focuses on API compatibility
 (similar to HuggingFace style) for loading/saving and generation.
-
 """
 
 from dataclasses import dataclass, asdict
@@ -147,19 +146,21 @@ class SchemaAugmentedSOMT(SOMTPreTrainedModel):
         self.importance_net = nn.Sequential(nn.Linear(d_model, 64), nn.ReLU(), nn.Linear(64, 1))
         self.obsolescence_net = nn.Sequential(nn.Linear(d_model, 64), nn.ReLU(), nn.Linear(64, 1))
 
-        # Persistent schema buffers: latent abstractions shared across batches
-        self.register_buffer("schema_keys", torch.randn(num_schemas, d_model) * 0.02)
-        self.register_buffer("schema_vals", torch.randn(num_schemas, d_model) * 0.02)
+        # Persistent schema buffers → trainable parameters (emergent but fixed post-training)
+        # These act as global abstraction units that self-organize during training.
+        self.schema_keys = nn.Parameter(torch.randn(num_schemas, d_model) * 0.02)
+        self.schema_vals = nn.Parameter(torch.randn(num_schemas, d_model) * 0.02)
+
+        # Track per-schema utility statistics as non-trainable buffers
         self.register_buffer("schema_utility_sum", torch.zeros(num_schemas))
         self.register_buffer("schema_usage_count", torch.zeros(num_schemas))
 
-        # Schema router: maps episodic traces into schema indices
+        # Schema router and utility head
         self.schema_router = nn.Sequential(nn.Linear(d_model, 64), nn.ReLU(), nn.Linear(64, num_schemas))
         self.schema_utility_head = nn.Sequential(nn.Linear(d_model, 32), nn.ReLU(), nn.Linear(32, 1))
 
         # Language modeling head (weight-tied)
         self.lm_head = nn.Linear(d_model, vocab_size, bias=False)
-        # tie weights
         try:
             self.lm_head.weight = self.embed.weight
         except Exception:
@@ -181,17 +182,6 @@ class SchemaAugmentedSOMT(SOMTPreTrainedModel):
         """Create upper-triangular causal mask for autoregressive attention."""
         return torch.triu(torch.ones(L, L, device=device), diagonal=1).bool()
 
-    def _form_schemas(self, mem_keys, mem_vals):
-        """Aggregate episodic memory into schema-level representations via routing network."""
-        # mem_keys: (B, M, D)
-        B, M, D = mem_keys.shape
-        if M == 0:
-            return self.schema_keys.unsqueeze(0).expand(B, -1, -1), torch.zeros(B, M, self.num_schemas, device=mem_keys.device)
-        routing_logits = self.schema_router(mem_keys)
-        routing_probs = F.softmax(routing_logits, dim=-1)
-        schema_reps = torch.einsum('bms,bmd->bsd', routing_probs, mem_keys)
-        return schema_reps, routing_probs
-
     def forward(self, x: torch.Tensor,
                 memory_keys: Optional[torch.Tensor] = None,
                 memory_vals: Optional[torch.Tensor] = None,
@@ -199,26 +189,27 @@ class SchemaAugmentedSOMT(SOMTPreTrainedModel):
                 precomputed_entropy_norm: Optional[torch.Tensor] = None,
                 precomputed_dynamic_threshold: Optional[torch.Tensor] = None,
                 step_mode: bool = False,
+                global_pos_offset: int = 0,  # PATCH: added for causal continuity
                 ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, Dict[str, torch.Tensor]]:
 
         B, L = x.shape
         device = x.device
 
         # ---- Explicit causal mask for encoder (critical fix) ----
-        causal_attn_mask = self._causal_mask(L, device)  # (L, L), True = mask
+        causal_attn_mask = self._causal_mask(L, device)
 
         # ---- Encoding with explicit mask ----
         x_emb = self.embed(x) + self.pos_embed[:, :L]
-        encoded = self.encoder(x_emb, mask=causal_attn_mask)  # now guaranteed causal
+        encoded = self.encoder(x_emb, mask=causal_attn_mask)
 
         # ---- Compute token-level entropy as uncertainty measure ----
         base_logits = self.lm_head(encoded)
         probs = F.softmax(base_logits.detach(), dim=-1)
-        entropy = -torch.sum(probs * torch.log(probs + 1e-12), dim=-1)  # (B, L)
+        entropy = -torch.sum(probs * torch.log(probs + 1e-12), dim=-1)
 
         if precomputed_entropy_norm is None:
             e_mean = entropy.mean(dim=1, keepdim=True)
-            e_std = entropy.std(dim=1, keepdim=True) + 1e-12
+            e_std = entropy.std(dim=1, keepdim=True, unbiased=False) + 1e-12
             entropy_norm = torch.sigmoid((entropy - e_mean) / e_std)
         else:
             entropy_norm = precomputed_entropy_norm.to(device)
@@ -251,6 +242,7 @@ class SchemaAugmentedSOMT(SOMTPreTrainedModel):
 
         updated_keys_list, updated_vals_list, updated_age_list = [], [], []
         updated_times_list = []
+        # PATCH: initialize aux accumulators as scalars on device
         entropy_reg_total = torch.tensor(0.0, device=device)
         l2_importance_total = torch.tensor(0.0, device=device)
 
@@ -264,7 +256,7 @@ class SchemaAugmentedSOMT(SOMTPreTrainedModel):
             mem_a = old_age.clone() if old_age.numel() else torch.empty(0, device=device)
 
             if old_age.numel():
-                mem_times = old_age.clone().long().to(device)
+                mem_times = old_age.clone().long().to(device)  # reuse age as timestamp storage
             else:
                 mem_times = torch.empty(0, dtype=torch.long, device=device)
 
@@ -277,10 +269,15 @@ class SchemaAugmentedSOMT(SOMTPreTrainedModel):
                     cand_v = self.value_proj(x_emb[b, t:t+1])
                     cand_a = torch.zeros(1, device=device)
 
+                    # PATCH: accumulate aux losses on write
+                    entropy_reg_total = entropy_reg_total + ent_t
+                    l2_importance_total = l2_importance_total + (cand_k.norm(p=2) + cand_v.norm(p=2)) * 0.5
+
                     mem_k = torch.cat([mem_k, cand_k], dim=0) if mem_k.numel() else cand_k.clone()
                     mem_v = torch.cat([mem_v, cand_v], dim=0) if mem_v.numel() else cand_v.clone()
                     mem_a = torch.cat([mem_a, cand_a], dim=0) if mem_a.numel() else cand_a.clone()
-                    t_tensor = torch.full((1,), t, dtype=torch.long, device=device)
+                    # PATCH: use global_pos_offset for absolute timestamp
+                    t_tensor = torch.full((1,), t + int(global_pos_offset), dtype=torch.long, device=device)
                     mem_times = torch.cat([mem_times, t_tensor], dim=0) if mem_times.numel() else t_tensor.clone()
 
                 if mem_a.numel() > 0:
@@ -288,8 +285,11 @@ class SchemaAugmentedSOMT(SOMTPreTrainedModel):
 
                 if mem_k.size(0) > self.mem_size:
                     importance = self.importance_net(mem_k).squeeze(-1)
+                    # PATCH: accumulate importance stats
+                    l2_importance_total = l2_importance_total + importance.pow(2).mean()
+
                     if mem_times.numel() > 0:
-                        age_slots = (t - mem_times).float().clamp(min=0.0)
+                        age_slots = (t + global_pos_offset - mem_times).float().clamp(min=0.0)
                         obsolescence_scores = self.obsolescence_net(mem_k).squeeze(-1)
                         age_penalty = age_slots * obsolescence_scores
                         importance = importance - age_penalty
@@ -322,29 +322,37 @@ class SchemaAugmentedSOMT(SOMTPreTrainedModel):
         updated_times = torch.stack(updated_times_list, dim=0)
 
         # ---- Causal retrieval & schema abstraction ----
-        schema_utility_loss = torch.tensor(0.0, device=device)
-
-        # Build causal retrieval mask: block memory written AFTER current time step
         time_idx = torch.arange(L, device=device).unsqueeze(0).unsqueeze(-1)      # (1, L, 1)
         mem_times_exp = updated_times.unsqueeze(1)                                # (B, 1, M)
-        retrieval_block_mask = mem_times_exp > time_idx                           # (B, L, M)
+        retrieval_block_mask = mem_times_exp > (time_idx + global_pos_offset)     # PATCH: include offset in mask
 
-        # Instance-level retrieval
         instance_scores = torch.bmm(queries, updated_keys.transpose(1, 2)) / math.sqrt(self.d_model)
         instance_scores = instance_scores.masked_fill(retrieval_block_mask, float('-inf'))
         instance_weights = F.softmax(instance_scores, dim=-1)
         instance_weights = torch.nan_to_num(instance_weights, nan=0.0)
         instance_context = torch.bmm(instance_weights, updated_vals)
 
-        # Schema-level retrieval (uses static schema bank — as in original)
         current_schema_keys = self.schema_keys.unsqueeze(0).expand(B, -1, -1)
         schema_scores = torch.matmul(queries, current_schema_keys.transpose(-2, -1)) / math.sqrt(self.d_model)
         schema_weights = F.softmax(schema_scores, dim=-1)
         schema_context = torch.matmul(schema_weights, self.schema_vals.unsqueeze(0).expand(B, -1, -1))
 
-        # Fuse contexts
         fused_context = self.retrieval_fuse(self.mem_dropout(schema_context + instance_context))
         encoded = encoded + fused_context
+
+        # --- PATCH: per-schema utility loss ---
+        current_schema_vals = self.schema_vals.unsqueeze(0).expand(B, -1, -1)
+        per_schema_cos = F.cosine_similarity(current_schema_keys, current_schema_vals, dim=-1).clamp(-1.0, 1.0)
+        per_schema_alignment_pos = (1.0 - per_schema_cos) / 2.0  # [0,1], high when misaligned
+        per_schema_activity = schema_weights.mean(dim=(0, 1))   # (S,)
+
+        schema_utility_loss = (per_schema_alignment_pos.mean(dim=0) * per_schema_activity).sum() / (per_schema_activity.sum().clamp(min=1e-6))
+
+        with torch.no_grad():
+            alpha = 0.05
+            per_schema_usage = per_schema_activity.detach()
+            self.schema_utility_sum = (1 - alpha) * self.schema_utility_sum + alpha * per_schema_usage
+            self.schema_usage_count = self.schema_usage_count + per_schema_usage
 
         logits = self.lm_head(encoded)
 
@@ -360,7 +368,6 @@ class SchemaAugmentedSOMT(SOMTPreTrainedModel):
         return logits, updated_keys, updated_vals, updated_age, aux
 
 
-    # Wrapper expected by HF users
     @torch.no_grad()
     def generate(
         self,
@@ -375,15 +382,9 @@ class SchemaAugmentedSOMT(SOMTPreTrainedModel):
         eos_token_id: Optional[int] = None,
         pad_token_id: Optional[int] = None,
     ):
-        """Autoregressive text generation with schema-aware episodic retrieval.
-        
-        Implements incremental generation with dynamic memory updates.
-        Supports temperature scaling, top-k/top-p filtering, and repetition penalty.
-        """
         device = next(self.parameters()).device
         self.eval()
 
-        # Initialize input
         if input_ids is None:
             if tokenizer is not None and prompt:
                 toks = tokenizer.encode(prompt, add_special_tokens=False)
@@ -396,17 +397,22 @@ class SchemaAugmentedSOMT(SOMTPreTrainedModel):
 
         generated = input_ids[0].tolist()
         mem_k, mem_v, mem_age = None, None, None
+        # PATCH: track global position for causal continuity
+        global_t = input_ids.size(1) if input_ids is not None else 0
 
         for _ in range(max_length):
-            logits, mem_k, mem_v, mem_age, _ = self(input_ids, mem_k, mem_v, mem_age)
+            # PATCH: use step_mode=True and global_pos_offset
+            logits, mem_k, mem_v, mem_age, _ = self(
+                input_ids, mem_k, mem_v, mem_age,
+                step_mode=True,
+                global_pos_offset=global_t
+            )
             next_logits = logits[:, -1, :]
 
-            # Repetition penalty
             for token_id in set(generated):
                 if 0 <= token_id < next_logits.size(-1):
                     next_logits[:, token_id] /= repetition_penalty
 
-            # Temperature + sampling
             next_logits = next_logits / max(temperature, 1e-6)
             next_logits = top_k_top_p_filtering(next_logits, top_k=top_k, top_p=top_p)
 
@@ -426,6 +432,7 @@ class SchemaAugmentedSOMT(SOMTPreTrainedModel):
 
             generated.append(token_id)
             input_ids = torch.tensor([[token_id]], dtype=torch.long, device=device)
+            global_t += 1  # PATCH: increment global timestep
 
             if len(generated) >= self.max_len:
                 break
@@ -440,5 +447,3 @@ class SchemaAugmentedSOMT(SOMTPreTrainedModel):
 # convenience alias for importers
 SOMTConfig = SOMTConfig
 SchemaAugmentedSOMT = SchemaAugmentedSOMT
-
-# 🜔
