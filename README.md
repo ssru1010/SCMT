@@ -25,16 +25,21 @@ It is **not suitable for production deployment** and should be used only in cont
 
 ## **Architectural Summary**
 
-| Component            | Description                                                                                                            |
-| -------------------- | ---------------------------------------------------------------------------------------------------------------------- |
-| **Base Encoder**     | `TransformerEncoder` (causal-masked) serving as the autoregressive backbone.                                           |
-| **Memory Module**    | Dynamic episodic memory with learned *importance*, *recency decay*, and *entropy-thresholded writing*.                 |
-| **Schema Router**    | MLP-based routing network aggregating episodic traces into persistent schema representations (`num_schemas`).          |
-| **Uncertainty Gate** | Scales attention queries based on local token entropy, controlling retrieval strength.                                 |
-| **Retrieval Fusion** | Merges schema-level and instance-level retrievals into a unified latent context.                                       |
-| **Auxiliary Heads**  | Lightweight scalar regularizers enforcing entropy smoothness, L2 importance stability, and schema-utility consistency. |
-| **Generation Head**  | Shared-weight LM head supporting temperature, top-k/top-p filtering, and repetition penalties.                         |
+| Component                | Description                                                                                                                                                                                                 |
+|--------------------------|-------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| **Base Encoder**         | Causal `TransformerEncoder` (with explicit additive causal mask) serving as the autoregressive backbone. Uses learned positional embeddings and standard feedforward layers.                                   |
+| **Episodic Memory**      | Dynamic key-value memory buffer (`mem_size`) with **importance-weighted retention**, **recency-aware obsolescence scoring**, and **entropy-thresholded writing**. Memory is pruned to capacity using learned importance and age penalties. |
+| **Uncertainty Gate**     | Token-level entropy (from base LM logits) is normalized and used to modulate attention queries via a sigmoid-gated projection: `query = query_proj(x) * (1 + uncertainty_gate(x))`. Controls retrieval sensitivity. |
+| **Dynamic Write Control**| A threshold network (`threshold_net`) decides per-token memory writes based on local entropy, causal mean/max entropy, and hidden state. Global memory budget is regulated by `budget_controller` (not yet enforced in write loop). |
+| **Schema Abstraction**   | Fixed-size set of trainable **schema keys/vals** (`num_schemas`) acting as persistent, emergent prototypes. Retrieved via soft attention over current queries.                                                |
+| **Schema Router**        | MLP (`schema_router`) computes per-token schema attention weights. Not used for routing *into* schemas, but for **schema utilization tracking** and utility-based regularization.                            |
+| **Retrieval Fusion**     | Instance-level (episodic) and schema-level contexts are summed and projected via `retrieval_fuse` to form a unified memory-augmented representation added to the encoder output.                              |
+| **Auxiliary Objectives** | Three regularizers: (1) **Entropy smoothness** (sum of normalized entropy at write points), (2) **L2 importance stability** (norm of written keys/vals), (3) **Schema utility loss** (activity-weighted key-val cosine alignment). |
+| **Generation Head**      | Weight-tied language modeling head with support for temperature scaling, top-*k*/top-*p* filtering, and repetition penalty during inference.                                                               |
 
+
+- ⚠️ **Budget controller** is computed but **not enforced** in the current write loop (only thresholding is active).
+- 🔒 All memory operations use **explicit detachment** and **pre-allocated buffers** to prevent memory leaks (as noted in your patch notes).
 
 
 ## **Configuration (`SOMTConfig`)**
