@@ -39,7 +39,7 @@ It is **not suitable for production deployment** and should be used only in cont
 
 
 - ⚠️ **Budget controller** is computed but **not enforced** in the current write loop (only thresholding is active).
-- 🔒 All memory operations use **explicit detachment** and **pre-allocated buffers** to prevent memory leaks (as noted in your patch notes).
+- 🔒 All memory operations use **explicit detachment** and **pre-allocated buffers** to prevent memory leaks.
 
 
 ## **Configuration (`SOMTConfig`)**
