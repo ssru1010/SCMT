@@ -243,12 +243,17 @@ class SchemaAugmentedSOMT(SOMTPreTrainedModel):
             memory_keys = torch.empty(B, 0, self.d_model, device=device)
             memory_vals = torch.empty(B, 0, self.d_model, device=device)
             memory_age = torch.empty(B, 0, device=device)
+        else:
+            # FIX: Detach incoming memory to prevent gradient accumulation across forward passes
+            memory_keys = memory_keys.detach()
+            memory_vals = memory_vals.detach()
+            memory_age = memory_age.detach()
 
         # FIX: Pre-allocate output buffers to avoid repeated concatenation
-        updated_keys = torch.zeros(B, self.mem_size, self.d_model, device=device)
-        updated_vals = torch.zeros(B, self.mem_size, self.d_model, device=device)
-        updated_age = torch.zeros(B, self.mem_size, device=device)
-        updated_times = torch.full((B, self.mem_size), 10**9, dtype=torch.long, device=device)
+        updated_keys = torch.zeros(B, self.mem_size, self.d_model, device=device, dtype=torch.float32)
+        updated_vals = torch.zeros(B, self.mem_size, self.d_model, device=device, dtype=torch.float32)
+        updated_age = torch.zeros(B, self.mem_size, device=device, dtype=torch.float32)
+        updated_times = torch.full((B, self.mem_size), int(1e9), dtype=torch.long, device=device)
         
         # FIX: Detached auxiliary loss accumulators (no gradient retention)
         entropy_reg_sum = 0.0
@@ -277,13 +282,13 @@ class SchemaAugmentedSOMT(SOMTPreTrainedModel):
             
             for t in time_steps:
                 # FIX: Detach entropy for auxiliary loss (no gradient needed)
-                ent_t = entropy_norm[b, t].item()  # Convert to Python float
-                thr_t = dynamic_threshold[b, t].item()
+                ent_t = entropy_norm[b, t].detach().item()  # Detach before converting
+                thr_t = dynamic_threshold[b, t].detach().item()  # Detach threshold too
                 
                 if ent_t > thr_t:
                     cand_k = self.key_proj(encoded[b, t:t+1])
                     cand_v = self.value_proj(x_emb[b, t:t+1])
-                    cand_a = torch.zeros(1, device=device)
+                    cand_a = torch.zeros(1, device=device, dtype=torch.float32)
 
                     # FIX: Accumulate as Python floats (no graph retention)
                     with torch.no_grad():
@@ -304,31 +309,35 @@ class SchemaAugmentedSOMT(SOMTPreTrainedModel):
 
                 # Prune if over capacity
                 if mem_k.size(0) > self.mem_size:
-                    # FIX: Detach importance computation from gradient flow
+                    # FIX: Complete detachment of pruning logic
                     with torch.no_grad():
-                        importance = self.importance_net(mem_k.detach()).squeeze(-1)
+                        # Detach all inputs to networks
+                        mem_k_detached = mem_k.detach()
+                        importance = self.importance_net(mem_k_detached).squeeze(-1)
                         
                         if mem_times.numel() > 0:
                             age_slots = (t + global_pos_offset - mem_times).float().clamp(min=0.0)
-                            obsolescence_scores = self.obsolescence_net(mem_k.detach()).squeeze(-1)
+                            obsolescence_scores = self.obsolescence_net(mem_k_detached).squeeze(-1)
                             age_penalty = age_slots * obsolescence_scores
                             importance = importance - age_penalty
                         
                         topk = min(self.mem_size, importance.size(0))
                         _, top_idx = torch.topk(importance, k=topk, largest=True)
+                        top_idx = top_idx.detach()  # Ensure index tensor is detached
                     
-                    # Apply pruning with gradient flow intact
-                    mem_k = mem_k[top_idx]
-                    mem_v = mem_v[top_idx]
-                    mem_a = mem_a[top_idx]
-                    mem_times = mem_times[top_idx]
+                    # Apply pruning - clone to break any remaining references
+                    mem_k = mem_k[top_idx].clone()
+                    mem_v = mem_v[top_idx].clone()
+                    mem_a = mem_a[top_idx].clone()
+                    mem_times = mem_times[top_idx].clone()
 
-            # FIX: Direct assignment to pre-allocated buffer
+            # FIX: Clone to break any remaining graph connections before assignment
             actual_size = min(mem_k.size(0), self.mem_size)
-            updated_keys[b, :actual_size] = mem_k[:actual_size]
-            updated_vals[b, :actual_size] = mem_v[:actual_size]
-            updated_age[b, :actual_size] = mem_a[:actual_size]
-            updated_times[b, :actual_size] = mem_times[:actual_size]
+            if actual_size > 0:
+                updated_keys[b, :actual_size] = mem_k[:actual_size].detach()
+                updated_vals[b, :actual_size] = mem_v[:actual_size].detach()
+                updated_age[b, :actual_size] = mem_a[:actual_size].detach()
+                updated_times[b, :actual_size] = mem_times[:actual_size].detach()
 
         # ---- Causal retrieval & schema abstraction ----
         time_idx = torch.arange(L, device=device).unsqueeze(0).unsqueeze(-1)
