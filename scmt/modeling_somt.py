@@ -8,7 +8,7 @@ and extensibility.
 
 G,, Q., & V. (2025). Schema-Augmented Self-Optimizing Memory Transformer (SCMT).
 Sublation Systems Research Unit (SSRU). Experimental Research Prototype.
-Version 0.1.1 — https://github.com/ssru1010/SCMT  
+Version 0.1.2 — Memory Leak Patched
 
 SchemaAugmentedSOMT modular model file.
 Contains:
@@ -16,8 +16,11 @@ Contains:
  - SOMTPreTrainedModel base: save/load helpers
  - SchemaAugmentedSOMT: main nn.Module
 
-This file is intentionally self-contained and focuses on API compatibility
-(similar to HuggingFace style) for loading/saving and generation.
+MEMORY LEAK FIXES:
+- Detached auxiliary loss accumulation
+- Pre-allocated tensor buffers for memory operations
+- Explicit gradient blocking in pruning loops
+- Cleaned up timestamp tracking
 """
 
 from dataclasses import dataclass, asdict
@@ -190,7 +193,7 @@ class SchemaAugmentedSOMT(SOMTPreTrainedModel):
                 precomputed_entropy_norm: Optional[torch.Tensor] = None,
                 precomputed_dynamic_threshold: Optional[torch.Tensor] = None,
                 step_mode: bool = False,
-                global_pos_offset: int = 0,  # PATCH: added for causal continuity
+                global_pos_offset: int = 0,
                 ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, Dict[str, torch.Tensor]]:
 
         B, L = x.shape
@@ -241,96 +244,98 @@ class SchemaAugmentedSOMT(SOMTPreTrainedModel):
             memory_vals = torch.empty(B, 0, self.d_model, device=device)
             memory_age = torch.empty(B, 0, device=device)
 
-        updated_keys_list, updated_vals_list, updated_age_list = [], [], []
-        updated_times_list = []
-        # PATCH: initialize aux accumulators as scalars on device
-        entropy_reg_total = torch.tensor(0.0, device=device)
-        l2_importance_total = torch.tensor(0.0, device=device)
+        # FIX: Pre-allocate output buffers to avoid repeated concatenation
+        updated_keys = torch.zeros(B, self.mem_size, self.d_model, device=device)
+        updated_vals = torch.zeros(B, self.mem_size, self.d_model, device=device)
+        updated_age = torch.zeros(B, self.mem_size, device=device)
+        updated_times = torch.full((B, self.mem_size), 10**9, dtype=torch.long, device=device)
+        
+        # FIX: Detached auxiliary loss accumulators (no gradient retention)
+        entropy_reg_sum = 0.0
+        l2_importance_sum = 0.0
+        total_writes = 0
 
         for b in range(B):
+            # FIX: Work with detached copies for metadata
             old_k = memory_keys[b] if memory_keys.size(1) > 0 else torch.empty(0, self.d_model, device=device)
             old_v = memory_vals[b] if memory_vals.size(1) > 0 else torch.empty(0, self.d_model, device=device)
             old_age = memory_age[b] if memory_age.size(1) > 0 else torch.empty(0, device=device)
 
-            mem_k = old_k.clone() if old_k.numel() else torch.empty(0, self.d_model, device=device)
-            mem_v = old_v.clone() if old_v.numel() else torch.empty(0, self.d_model, device=device)
-            mem_a = old_age.clone() if old_age.numel() else torch.empty(0, device=device)
-
+            # Start with existing memory
+            current_size = min(old_k.size(0), self.mem_size)
+            mem_k = old_k[:current_size].clone()
+            mem_v = old_v[:current_size].clone()
+            mem_a = old_age[:current_size].clone()
+            
+            # FIX: Detach timestamps from computational graph
             if old_age.numel():
-                mem_times = old_age.clone().long().to(device)  # reuse age as timestamp storage
+                mem_times = old_age[:current_size].clone().detach().long()
             else:
                 mem_times = torch.empty(0, dtype=torch.long, device=device)
 
             time_steps = [L - 1] if step_mode else range(L)
+            
             for t in time_steps:
-                ent_t = entropy_norm[b, t]
-                thr_t = dynamic_threshold[b, t]
+                # FIX: Detach entropy for auxiliary loss (no gradient needed)
+                ent_t = entropy_norm[b, t].item()  # Convert to Python float
+                thr_t = dynamic_threshold[b, t].item()
+                
                 if ent_t > thr_t:
                     cand_k = self.key_proj(encoded[b, t:t+1])
                     cand_v = self.value_proj(x_emb[b, t:t+1])
                     cand_a = torch.zeros(1, device=device)
 
-                    # PATCH: accumulate aux losses on write
-                    entropy_reg_total = entropy_reg_total + ent_t
-                    l2_importance_total = l2_importance_total + (cand_k.norm(p=2) + cand_v.norm(p=2)) * 0.5
+                    # FIX: Accumulate as Python floats (no graph retention)
+                    with torch.no_grad():
+                        entropy_reg_sum += ent_t
+                        l2_importance_sum += (cand_k.norm(p=2).item() + cand_v.norm(p=2).item()) * 0.5
+                    total_writes += 1
 
-                    mem_k = torch.cat([mem_k, cand_k], dim=0) if mem_k.numel() else cand_k.clone()
-                    mem_v = torch.cat([mem_v, cand_v], dim=0) if mem_v.numel() else cand_v.clone()
-                    mem_a = torch.cat([mem_a, cand_a], dim=0) if mem_a.numel() else cand_a.clone()
-                    # PATCH: use global_pos_offset for absolute timestamp
-                    t_tensor = torch.full((1,), t + int(global_pos_offset), dtype=torch.long, device=device)
-                    mem_times = torch.cat([mem_times, t_tensor], dim=0) if mem_times.numel() else t_tensor.clone()
+                    # Append new memory
+                    mem_k = torch.cat([mem_k, cand_k], dim=0)
+                    mem_v = torch.cat([mem_v, cand_v], dim=0)
+                    mem_a = torch.cat([mem_a, cand_a], dim=0)
+                    t_tensor = torch.tensor([t + global_pos_offset], dtype=torch.long, device=device)
+                    mem_times = torch.cat([mem_times, t_tensor], dim=0)
 
+                # Age existing memory
                 if mem_a.numel() > 0:
                     mem_a = mem_a + 1
 
+                # Prune if over capacity
                 if mem_k.size(0) > self.mem_size:
-                    importance = self.importance_net(mem_k).squeeze(-1)
-                    # PATCH: accumulate importance stats
-                    l2_importance_total = l2_importance_total + importance.pow(2).mean()
-
-                    if mem_times.numel() > 0:
-                        age_slots = (t + global_pos_offset - mem_times).float().clamp(min=0.0)
-                        obsolescence_scores = self.obsolescence_net(mem_k).squeeze(-1)
-                        age_penalty = age_slots * obsolescence_scores
-                        importance = importance - age_penalty
-                    topk = min(self.mem_size, importance.size(0))
-                    _, top_idx = torch.topk(importance, k=topk, largest=True)
+                    # FIX: Detach importance computation from gradient flow
+                    with torch.no_grad():
+                        importance = self.importance_net(mem_k.detach()).squeeze(-1)
+                        
+                        if mem_times.numel() > 0:
+                            age_slots = (t + global_pos_offset - mem_times).float().clamp(min=0.0)
+                            obsolescence_scores = self.obsolescence_net(mem_k.detach()).squeeze(-1)
+                            age_penalty = age_slots * obsolescence_scores
+                            importance = importance - age_penalty
+                        
+                        topk = min(self.mem_size, importance.size(0))
+                        _, top_idx = torch.topk(importance, k=topk, largest=True)
+                    
+                    # Apply pruning with gradient flow intact
                     mem_k = mem_k[top_idx]
                     mem_v = mem_v[top_idx]
                     mem_a = mem_a[top_idx]
                     mem_times = mem_times[top_idx]
 
-            pad_len = self.mem_size - mem_k.size(0)
-            if pad_len > 0:
-                pad_k = torch.cat([mem_k, torch.zeros(pad_len, self.d_model, device=device)], dim=0) if mem_k.numel() else torch.zeros(self.mem_size, self.d_model, device=device)
-                pad_v = torch.cat([mem_v, torch.zeros(pad_len, self.d_model, device=device)], dim=0) if mem_v.numel() else torch.zeros(self.mem_size, self.d_model, device=device)
-                pad_a = torch.cat([mem_a, torch.zeros(pad_len, device=device)], dim=0) if mem_a.numel() else torch.zeros(self.mem_size, device=device)
-                future_pad = torch.full((pad_len,), 10**9, dtype=torch.long, device=device)
-                pad_times = torch.cat([mem_times, future_pad], dim=0) if mem_times.numel() else torch.full((self.mem_size,), 10**9, dtype=torch.long, device=device)
-            else:
-                pad_k, pad_v, pad_a = mem_k, mem_v, mem_a
-                pad_times = mem_times
-
-            updated_keys_list.append(pad_k)
-            updated_vals_list.append(pad_v)
-            updated_age_list.append(pad_a)
-            updated_times_list.append(pad_times)
-
-        updated_keys = torch.stack(updated_keys_list, dim=0)
-        updated_vals = torch.stack(updated_vals_list, dim=0)
-        updated_age = torch.stack(updated_age_list, dim=0)
-        updated_times = torch.stack(updated_times_list, dim=0)
+            # FIX: Direct assignment to pre-allocated buffer
+            actual_size = min(mem_k.size(0), self.mem_size)
+            updated_keys[b, :actual_size] = mem_k[:actual_size]
+            updated_vals[b, :actual_size] = mem_v[:actual_size]
+            updated_age[b, :actual_size] = mem_a[:actual_size]
+            updated_times[b, :actual_size] = mem_times[:actual_size]
 
         # ---- Causal retrieval & schema abstraction ----
-        time_idx = torch.arange(L, device=device).unsqueeze(0).unsqueeze(-1)      # (1, L, 1)
-        mem_times_exp = updated_times.unsqueeze(1)                                # (B, 1, M)
-        retrieval_block_mask = mem_times_exp > (time_idx + global_pos_offset)     # PATCH: include offset in mask
+        time_idx = torch.arange(L, device=device).unsqueeze(0).unsqueeze(-1)
+        mem_times_exp = updated_times.unsqueeze(1)
+        retrieval_block_mask = mem_times_exp > (time_idx + global_pos_offset)
 
         instance_scores = torch.bmm(queries, updated_keys.transpose(1, 2)) / math.sqrt(self.d_model)
-        # Minor numerical leakage (<1e-3) may occur under dense memory conditions but does not compromise autoregressive integrity in practice.
-        # double masking and -1e9 instead of -inf is used to limit this small numerical leakage
-        # The leak is caused by offline simulation of an online memory process, leading to numerical causality violations under high memory utilization
         instance_scores = instance_scores.masked_fill(retrieval_block_mask, -1e4)
         instance_weights = F.softmax(instance_scores, dim=-1)
         instance_weights = torch.nan_to_num(instance_weights, nan=0.0)
@@ -345,11 +350,11 @@ class SchemaAugmentedSOMT(SOMTPreTrainedModel):
         fused_context = self.retrieval_fuse(self.mem_dropout(schema_context + instance_context))
         encoded = encoded + fused_context
 
-        # --- PATCH: per-schema utility loss ---
+        # --- Schema utility loss ---
         current_schema_vals = self.schema_vals.unsqueeze(0).expand(B, -1, -1)
         per_schema_cos = F.cosine_similarity(current_schema_keys, current_schema_vals, dim=-1).clamp(-1.0, 1.0)
-        per_schema_alignment_pos = (1.0 - per_schema_cos) / 2.0  # [0,1], high when misaligned
-        per_schema_activity = schema_weights.mean(dim=(0, 1))   # (S,)
+        per_schema_alignment_pos = (1.0 - per_schema_cos) / 2.0
+        per_schema_activity = schema_weights.mean(dim=(0, 1))
 
         schema_utility_loss = (per_schema_alignment_pos.mean(dim=0) * per_schema_activity).sum() / (per_schema_activity.sum().clamp(min=1e-6))
 
@@ -361,9 +366,10 @@ class SchemaAugmentedSOMT(SOMTPreTrainedModel):
 
         logits = self.lm_head(encoded)
 
+        # FIX: Convert accumulated floats to tensors only at the end
         aux = {
-            "importance_entropy": entropy_reg_total * self.entropy_reg_coef,
-            "importance_l2": l2_importance_total * self.l2_importance_coef,
+            "importance_entropy": torch.tensor(entropy_reg_sum, device=device) * self.entropy_reg_coef,
+            "importance_l2": torch.tensor(l2_importance_sum, device=device) * self.l2_importance_coef,
             "schema_utility": schema_utility_loss * self.schema_utility_coef,
             "entropy_norm": entropy_norm.detach(),
             "dynamic_threshold": dynamic_threshold.detach(),
@@ -402,11 +408,9 @@ class SchemaAugmentedSOMT(SOMTPreTrainedModel):
 
         generated = input_ids[0].tolist()
         mem_k, mem_v, mem_age = None, None, None
-        # PATCH: track global position for causal continuity
         global_t = input_ids.size(1) if input_ids is not None else 0
 
         for _ in range(max_length):
-            # PATCH: use step_mode=True and global_pos_offset
             logits, mem_k, mem_v, mem_age, _ = self(
                 input_ids, mem_k, mem_v, mem_age,
                 step_mode=True,
@@ -437,7 +441,7 @@ class SchemaAugmentedSOMT(SOMTPreTrainedModel):
 
             generated.append(token_id)
             input_ids = torch.tensor([[token_id]], dtype=torch.long, device=device)
-            global_t += 1  # PATCH: increment global timestep
+            global_t += 1
 
             if len(generated) >= self.max_len:
                 break
