@@ -6,7 +6,10 @@ The design encourages compact, reusable representations that can self-organize o
 
 The implementation is **self-contained, modular, and HuggingFace-compatible**, emphasizing **interpretability**, **experimental transparency**, and **research extensibility**.
 
-v0.1 Research Preview – October 2025
+v0.1.2 – October 2025
+
+## **Current Status**
+This model and repository are currently in development mode. A causal leakage issue (which occurs intermittently) is still being investigated. Any contributions or insights to help resolve this problem are greatly appreciated.
 
 
 ## **Intended Use**
@@ -18,7 +21,6 @@ This model is intended for **research exploration** in:
 * Symbolic generalization across structured domains (e.g., molecules, code, or text).
 
 It is **not suitable for production deployment** and should be used only in controlled research environments.
-
 
 
 ## **Architectural Summary**
@@ -114,40 +116,13 @@ Training over ~2717 k steps indicates stable entropy-regulated adaptation:
 
 ## 1 Epoch 3 Seeds
 **Benchmark:** Molecular SELFIES generation (1 epochs × 3 seeds)
-The Schema-Augmented SOMT (SCMT) demonstrates clear and consistent superiority over the baseline GPT-2 on molecular SELFIES generation after only a single epoch.
-A 9.5 % perplexity reduction suggests that SCMT’s schema guidance enhances language-model certainty and structural awareness. The 5.3 % loss decrease complements this, showing genuine learning efficiency rather than random variance. With a Cohen’s d > 3, the observed advantage is not only statistically reliable but also of substantial practical importance — SCMT’s inductive bias meaningfully stabilizes early training.
-
-
-| **Metric**           | **SCMT**        | **GPT-2**       | **Δ Improvement** | **Interpretation**                                                                           |
-| -------------------- | --------------- | --------------- | ----------------- | -------------------------------------------------------------------------------------------- |
-| **Eval Loss**        | 1.7637 ± 0.0106 | 1.8634 ± 0.0173 | **−5.35 %**       | Lower cross-entropy indicates more efficient encoding of sequence structure.                 |
-| **Perplexity (PPL)** | 5.83 ± 0.06     | 6.45 ± 0.11     | **−9.50 %**       | Substantial reduction in uncertainty; SCMT generates more confident, consistent predictions. |
-| **Cohen’s *d***      | 3.62            | —               | —                 | Extremely large effect size; improvement is both statistically and practically significant.  |
-| **Paired *t*-test**  | *t* = 6.28      | *p* = 0.0245    | —                 | Strong evidence that SCMT outperforms GPT-2 beyond chance.                                   |
-
-
-<div align="left">
-  <img src="img/benchmark1.png" width="420"/>
-  <img src="img/benchmark2.png" width="420"/>
-</div>
 
 
 #### 3 Epochs 3 Seeds
 **Benchmark:** Molecular SELFIES generation (3 epochs × 3 seeds)
 
-| Model | Eval Loss ± Std | PPL ± Std | Δ Loss Improvement | Cohen’s *d* | *p*-value |
-|:--|--:|--:|--:|--:|--:|
-| GPT-2 baseline | 5.545 ± 0.011 | 255.98 ± 2.73 | — | — | — |
-| **SCMT (SOMT)** | **0.597 ± 0.527** | **2.00 ± 1.14** | **− 89.2 %** | **9.26** | **0.0039 ✓** |
 
-<div align="left">
-  <img src="img/benchmark3_1.png" width="420"/>
-  <img src="img/benchmark3_2.png" width="420"/>
-</div> 
-
-> Summary: SCMT achieves 
-
-### **Qualitative Schema Analysis**
+### **Qualitative Schema Analysis (LEGACY | WIP)**
 
 **Chemical sequence modeling (24 k samples, vocab 793)**:
 Schemas self-organize around interpretable substructures such as , suggesting emergent recognition of chemical motifs.
@@ -185,21 +160,6 @@ Schema  6: " (0.532) |  from (0.325) |  replied (0.321) |  again (0.321) | ! (0.
 > SCMT exhibits interpretable schema formation, stable entropy dynamics, and consistent memory utilization.
 > Further scaling is required to test its full language modeling potential, but results in molecular sequence modeling tentatively validate its underlying mechanisms.
 
-
-## **Current Status**
-
-| Aspect                  | Status                     |
-| ----------------------- | -------------------------- |
-| Training Stability      | ✅ Stable                   |
-| Schema Interpretability | ✅ Emerging                 |
-| Cross-domain Behavior   | ⚙️ Preliminary             |
-| NLP Evaluation          | ⚠️ Limited (compute-bound) |
-| Chemical Modeling       | ✅ Active focus             |
-| Benchmarks              | 🚧 In Progress             |
-| Safety & Fairness       | ❌ Not Assessed             |
-
-
-
 ## **Citation**
 ```bibtex
 @software{ssru2025scmt,
@@ -209,6 +169,6 @@ Schema  6: " (0.532) |  from (0.325) |  replied (0.321) |  again (0.321) | ! (0.
   organization = {Sublation Systems Research Unit (SSRU)},
   note         = {Experimental Research Prototype},
   url          = {https://github.com/ssru1010/SCMT},
-  version      = {0.1.0},
+  version      = {0.1.2},
 }
 ```
